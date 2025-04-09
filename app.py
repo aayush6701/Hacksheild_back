@@ -1,0 +1,147 @@
+import base64
+import json
+from stegano import lsb
+from PIL import Image
+from io import BytesIO
+from flask import Flask, request, jsonify
+from flask_cors import CORS
+from pymongo import MongoClient
+import datetime
+import hashlib
+import os
+
+app = Flask(__name__)
+CORS(app)
+
+client = MongoClient('mongodb+srv://aditikumariwork:Aditijisunderhai@hacksheild.tlryxqk.mongodb.net/?retryWrites=true&w=majority&appName=Hacksheild')
+db = client['hacksheild']
+collection = db['blocks']
+
+UPLOAD_FOLDER = './uploads'
+os.makedirs(UPLOAD_FOLDER, exist_ok=True)
+
+def generate_hash(data: dict):
+    json_string = json.dumps(data, sort_keys=True)
+    return hashlib.sha256(json_string.encode()).hexdigest()
+
+@app.route('/encode', methods=['POST'])
+def encode():
+    try:
+        image = request.files.get('image')
+        recipient = request.form.get('recipient', '').strip()
+        device_id = request.form.get('device_id', '').strip()
+        secret = request.form.get('secret', '').strip()
+        timestamp = datetime.datetime.utcnow().isoformat()
+
+        if not image or not recipient or not device_id or not secret:
+            return jsonify({'success': False, 'message': 'Missing fields'}), 400
+
+        # Prepare initial payload
+        base_payload = {
+            "recipient": recipient,
+            "device_id": device_id,
+            "secret": secret,
+            "timestamp": timestamp
+        }
+
+        # Generate hash from base payload
+        full_hash = generate_hash(base_payload)
+
+        # Final payload to embed into image (includes the hash now)
+        final_payload = base_payload.copy()
+        final_payload["hash"] = full_hash
+
+        # Convert final payload to JSON string
+        payload_json = json.dumps(final_payload)
+
+        # Open and encode image
+        image_pil = Image.open(image.stream).convert("RGB")
+        encoded_image = lsb.hide(image_pil, payload_json)
+
+        # Save image to memory
+        output = BytesIO()
+        encoded_image.save(output, format='PNG')
+        output.seek(0)
+        encoded_bytes = output.getvalue()
+
+        # Convert image to base64
+        encoded_base64 = base64.b64encode(encoded_bytes).decode('utf-8')
+
+        # Save hash + device_id to MongoDB
+        collection.insert_one({
+            "device_id": device_id,
+            "hash": full_hash
+        })
+
+        return jsonify({
+            'success': True,
+            'image_base64': encoded_base64
+        }), 200
+
+    except Exception as e:
+        print("🔥 Error:", e)
+        return jsonify({'success': False, 'message': str(e)}), 500
+
+
+@app.route('/decode', methods=['POST'])
+def decode():
+    try:
+        image = request.files.get('image')
+        device_id = request.form.get('device_id')
+
+        if not image or not device_id:
+            return jsonify({'success': False, 'message': 'Missing image or device ID'}), 400
+
+        # Open the image
+        image_pil = Image.open(image.stream).convert("RGB")
+
+        # Decode hidden data from image using LSB
+        hidden_data = lsb.reveal(image_pil)
+
+        if not hidden_data:
+            return jsonify({'success': False, 'message': 'No hidden data found in the image'}), 400
+
+        # Parse the hidden JSON payload
+        try:
+            payload = json.loads(hidden_data)
+        except Exception:
+            return jsonify({'success': False, 'message': 'Invalid hidden data format'}), 400
+
+        # Step 1: Check if the decoding device is the intended recipient
+        recipient = payload.get('recipient')
+        if recipient != device_id:
+            return jsonify({'success': False, 'message': '❌ This device is not authorized to decode this message'}), 403
+
+        # Step 2: Extract the original hash and recreate hash from current fields
+        original_hash = payload.get('hash')
+        if not original_hash:
+            return jsonify({'success': False, 'message': 'No hash found in the hidden message'}), 400
+
+        # Rebuild the payload used during encode (exclude the 'hash' key)
+        verify_payload = {
+            "recipient": payload.get("recipient"),
+            "device_id": payload.get("device_id"),
+            "secret": payload.get("secret"),
+            "timestamp": payload.get("timestamp")
+        }
+
+        calculated_hash = generate_hash(verify_payload)
+
+        if calculated_hash != original_hash:
+            return jsonify({'success': False, 'message': '⚠️ Message has been altered'}), 400
+
+        # Step 3: Verify hash exists in DB
+        record = collection.find_one({"device_id": device_id, "hash": original_hash})
+        if not record:
+            return jsonify({'success': False, 'message': 'Hash not found in database. Message may be invalid.'}), 400
+
+        # All checks passed, return the secret message
+        return jsonify({'success': True, 'secret': payload.get('secret')}), 200
+
+    except Exception as e:
+        print("🔥 Decode Error:", e)
+        return jsonify({'success': False, 'message': str(e)}), 500
+
+
+if __name__ == '__main__':
+    app.run(host='0.0.0.0', port=5000)
