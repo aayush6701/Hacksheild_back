@@ -20,6 +20,10 @@ collection = db['blocks']
 UPLOAD_FOLDER = './uploads'
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 
+@app.route('/')
+def home():
+    return jsonify({'message': 'HackShield backend is live 🔐'}), 200
+
 def generate_hash(data: dict):
     json_string = json.dumps(data, sort_keys=True)
     return hashlib.sha256(json_string.encode()).hexdigest()
