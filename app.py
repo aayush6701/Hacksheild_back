@@ -11,7 +11,7 @@ import hashlib
 import os
 
 app = Flask(__name__)
-CORS(app)
+CORS(app, resources={r"/*": {"origins": "*"}})
 
 client = MongoClient('mongodb+srv://aditikumariwork:Aditijisunderhai@hacksheild.tlryxqk.mongodb.net/?retryWrites=true&w=majority&appName=Hacksheild')
 db = client['hacksheild']
